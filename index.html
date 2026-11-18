@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Robot Painter — prototype</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg: #f6f4ef; --fg: #222; --muted: #777; --line: #d9d4c8; --accent: #c0309a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  main { display: flex; gap: 20px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #views { display: flex; gap: 16px; flex-wrap: wrap; }
+  figure { margin: 0; }
+  figcaption { font-weight: 600; margin-bottom: 4px; }
+  canvas { display: block; image-rendering: pixelated; border: 1px solid var(--line); cursor: crosshair; }
+  #coords { color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 6px; min-height: 1.4em; }
+  #side { flex: 1; min-width: 340px; max-width: 620px; display: flex; flex-direction: column; gap: 12px; }
+  #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  .stat .label { color: var(--muted); font-size: 12px; }
+  .stat .value { font-size: 18px; font-variant-numeric: tabular-nums; }
+  #instructions { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+  #log { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px; height: 300px; overflow-y: auto; }
+  .entry { margin: 4px 0; white-space: pre-wrap; }
+  .entry .who { font-weight: 600; margin-right: 6px; }
+  .principal .who { color: #2a6; }
+  .robot .who { color: var(--accent); }
+  .system { color: var(--muted); font-style: italic; }
+  .debug { color: #567; font: 12px/1.35 ui-monospace, monospace; background: #f3f5f8; padding: 4px; border-radius: 4px; }
+  #composer { display: flex; gap: 8px; align-items: stretch; }
+  #msg { flex: 1; min-height: 60px; resize: vertical; font: inherit; padding: 6px; }
+  #composer .buttons { display: flex; flex-direction: column; gap: 6px; }
+  button { font: inherit; padding: 6px 12px; cursor: pointer; }
+  button:disabled { cursor: default; opacity: 0.5; }
+  #end { align-self: flex-start; }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <div id="views">
+      <figure><figcaption>Live view</figcaption><canvas id="live"></canvas></figure>
+      <figure><figcaption>Target</figcaption><canvas id="target"></canvas></figure>
+    </div>
+    <div id="coords">Hover over a view to see coordinates.</div>
+  </section>
+
+  <section id="side">
+    <div id="stats">
+      <div class="stat"><div class="label">Time</div><div class="value" id="s-time">0:00</div></div>
+      <div class="stat"><div class="label">Input tokens</div><div class="value" id="s-in">0</div></div>
+      <div class="stat"><div class="label">Output tokens</div><div class="value" id="s-out">0</div></div>
+      <div class="stat"><div class="label">Match</div><div class="value" id="s-match">0%</div></div>
+    </div>
+    <button id="end">End Game (&amp; Submit Score)</button>
+    <div id="instructions"></div>
+    <div id="log"></div>
+    <div id="composer">
+      <textarea id="msg" placeholder="Instructions for the robot (Enter to send, Shift+Enter for a new line)"></textarea>
+      <div class="buttons">
+        <button id="send">Send to Agent</button>
+        <button id="halt" disabled>Halt Robot</button>
+      </div>
+    </div>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
