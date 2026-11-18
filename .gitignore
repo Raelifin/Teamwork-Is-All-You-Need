@@ -1,0 +1,5 @@
+scores.jsonl
+server.log
+.server.pid
+.env
+__pycache__/

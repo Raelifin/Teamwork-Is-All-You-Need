@@ -279,7 +279,7 @@ async function endGame() {
     // No server (or it failed): save the record locally instead.
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' }));
-    a.download = `robot-painter-${LEVEL.id}-${Date.now()}.json`;
+    a.download = `teamwork-${LEVEL.id}-${Date.now()}.json`;
     a.click();
     addLog('system', 'Could not reach the server, so the score record was downloaded instead.');
   }

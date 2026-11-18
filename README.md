@@ -1,25 +1,36 @@
-# Robot Painter (prototype)
+# Teamwork Is All You Need (prototype)
 
 A human player instructs an LLM-controlled robot to make a top-down grid room match a target picture.
 
 ## Run
 
+Python 3.10+, standard library only. Put settings in a `.env` file (gitignored) or the environment:
+
 ```sh
-ANTHROPIC_API_KEY=... node server.js            # defaults to MODEL=claude-sonnet-5-5
-MODEL=claude-opus-5-5 ANTHROPIC_API_KEY=... node server.js
-PROVIDER=openai MODEL=<model> OPENAI_API_KEY=... node server.js
-PROVIDER=openai MODEL=llama3.1 BASE_URL=http://localhost:11434/v1 node server.js   # Ollama etc.
+ANTHROPIC_API_KEY=...          # default provider; MODEL defaults to claude-sonnet-5-5
+MODEL=claude-opus-5-5
+PROVIDER=openai MODEL=<model> OPENAI_API_KEY=...
+PROVIDER=openai MODEL=llama3.1 BASE_URL=http://localhost:11434/v1   # Ollama etc.
+PORT=8000                      # listens on 0.0.0.0
+IDLE_HOURS=2                   # exits after this long with no requests (0 = never)
 ```
 
-Open http://localhost:8000. Node 18+, no dependencies.
+```sh
+./run.sh            # (re)start in the background, logging to server.log
+./run.sh stop | status | log
+python3 server.py --port 8123 --idle-hours 2   # foreground
+```
+
+Open http://<host>:<port>/.
 
 URL options: `?agent=manual` (type robot commands yourself, no model needed), `?debug` (show tool calls and observations in the log), `?level=<id>`.
 
 ## Files
 
 - `sim.js`: the simulation (levels, actions, observations, rendering, scoring). Has no DOM code, so it also runs in Node for scripted or headless evals.
+- `run.sh`: background start/stop/restart.
 - `app.js`: browser UI and agent loop. The system prompt is at the top.
-- `server.js`: serves the page, proxies `/api/chat` to the model (keeps the API key server-side), appends `/api/score` records (with full transcripts) to `scores.jsonl`.
+- `server.py`: serves the page (no caching, so edits show on reload), proxies `/api/chat` to the model (keeps the API key server-side), appends `/api/score` records (with full transcripts) to `scores.jsonl`.
 
 ## Design notes
 
