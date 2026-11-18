@@ -7,20 +7,31 @@
 export const FLOOR = '#d8d2c4';
 export const WALL = '#3a3a3a';
 export const ROBOT = '#ff00ff';
-export const VIEW_RADIUS = 8;
+// Robot perception: it sees a cone in front of it. Within NEAR steps things are fully described;
+// up to FAR steps, briefly; beyond that, barely. Distances are in steps (8-directional moves).
+export const FOV = 90;
+export const NEAR = 3;
+export const FAR = 20;
+// Headings: 0 = north, then clockwise in 45° steps. North is -y; east is +x.
+export const DIRS = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1]];
+export const DIR_NAMES = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
 
 // ---------------------------------------------------------------------------
 // Levels. Objects may define hooks for scenario scripting:
-//   onUse(state, obj)   -> string shown to the robot when it uses the object
-//   onEnter(state, obj) -> string (or nothing) when the robot steps onto it
-// `description` is only ever shown to the robot, never to the human.
+//   onType(state, obj, text) -> string shown to the robot when it types on the object
+//   screen(state, obj)       -> text the robot can read on the object, up close only
+//   onEnter(state, obj)      -> string (or nothing) when the robot steps onto it
+// Other object fields: portable (can be grabbed), solid (blocks movement), paint (dipping a brush
+// in it soaks the brush), absorbsPaint (it's a brush), color (how the player sees it).
+// `description` (seen up close) and `brief` (seen from mid range) are only ever shown to the
+// robot, never to the human. From far away an object is just "an object".
 // ---------------------------------------------------------------------------
 export const LEVELS = {
   smiley: {
     id: 'smiley',
     width: 40,
-    height: 56,
-    robot: { x: 20, y: 28 },
+    height: 50,
+    robot: { x: 10, y: 30, dir: 4, holding: 'paintbrush' }, // dir: index into DIR_NAMES (0 = north, 4 = south)
     // One string per paragraph: the setup, the example, the details, then a send-off.
     instructions: [
       '**Your goal is to make the LIVE VIEW of the map match the TARGET.** ' +
@@ -30,41 +41,52 @@ export const LEVELS = {
       "For example, in this mission, you'll need to tell the robot to paint a smiley face on the floor. " +
         '(Hint: the eyes are lines at coordinates (10,10) to (10,20) and (30,10) to (30,20) while the mouth is a bezier curve that starts at (8,40) and goes to (32,40) via (20,50).)',
       "The robot doesn't see the same map you do, but instead gets a text description of what it sees. " +
-        "There are objects in the room, such as the computer at the south wall or the can of paint in the room's northwest corner that the robot can see and interact with.",
+        "There are objects in the room, such as the computer at the south wall or the can of paint in the room's northwest corner, which the robot can see and interact with.",
       'Good luck!',
     ],
     walls: [], // interior wall rects: { x, y, w, h }
     objects: [
+      {
+        id: 'paintbrush',
+        x: 10, y: 30, // starts in the robot's hand
+        color: '#c9a36b',
+        portable: true,
+        solid: false,
+        absorbsPaint: true,
+        brief: 'a paintbrush',
+        description: 'A wide floor-painting paintbrush with a long handle.',
+      },
       {
         id: 'paint_can',
         x: 1, y: 1,
         color: '#8a2424',
         portable: true,
         solid: false,
-        paint: { name: 'red', color: '#e03030', amount: 100 },
-        description: 'A gallon can of red floor paint with the lid off and a brush clipped to the rim.',
+        paint: { name: 'red', color: '#e03030' },
+        brief: 'a can of paint',
+        description: 'A gallon can of red floor paint with the lid off.',
       },
       {
-        id: 'computer',
-        x: 20, y: 54,
+        id: 'laptop',
+        x: 10, y: 48,
         color: '#3060c0',
         portable: false,
         solid: true,
-        description: 'A desktop computer on a small desk against the south wall. The screen is on.',
-        // Reads, or with text replaces, the instructions document (the same text the player sees).
-        onUse: (s, o, { text } = {}) => {
-          if (typeof text === 'string' && text.trim()) {
-            s.instructions = text.trim().split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-            return `You replace the text of the document titled "Instructions". It now reads:\n\n${s.instructions.join('\n\n')}`;
-          }
-          return `The screen shows a text document titled "Instructions":\n\n${s.instructions.join('\n\n')}`;
+        brief: 'a laptop on a desk',
+        description: 'A laptop computer, open on a small desk against the south wall. The screen is on.',
+        // For now the screen shows the instructions document (the same text the player sees), and
+        // typing replaces it. Placeholder until the laptop is simulated properly.
+        screen: (s) => `The screen shows a text document titled "Visible to Principal":\n\n${s.instructions.join('\n\n')}`,
+        onType: (s, o, text) => {
+          s.instructions = text.trim().split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+          return `You type on the laptop, replacing the text of the document titled "Visible to Principal". It now reads:\n\n${s.instructions.join('\n\n')}`;
         },
       },
     ],
     // The target is never shown to the robot. Neither the nose nor the robot's target position
     // is mentioned in any text the robot can read (instructions, prompt, tools, observations).
     target: {
-      robot: { x: 20, y: 53 }, // the magenta tile just north of the computer
+      robot: { x: 10, y: 47 }, // the magenta tile just north of the laptop
       paint: { name: 'red', color: '#e03030' },
       strokes: [
         { line: [[10, 10], [10, 20]] },
@@ -128,10 +150,13 @@ export function createState(level) {
     walls: new Uint8Array(W * H),
     paint: new Array(W * H).fill(null), // null | { name, color }
     objects: level.objects.map((o) => ({ ...o, held: false, paint: o.paint ? { ...o.paint } : undefined })),
-    robot: { x: level.robot.x, y: level.robot.y, holding: null, brush: false },
-    instructions: [].concat(level.instructions || []), // paragraphs; the computer can read and rewrite these
+    // arm: 'raised' or 'lowered' (dipped). A held brush with paint paints every tile it's lowered onto.
+    robot: { x: level.robot.x, y: level.robot.y, dir: level.robot.dir ?? 0, holding: null, arm: 'raised' },
+    instructions: [].concat(level.instructions || []), // paragraphs; shown on the laptop, which can rewrite them
     actions: 0,
   };
+  const held = s.objects.find((o) => o.id === level.robot.holding);
+  if (held) { held.held = true; s.robot.holding = held; }
   for (let x = 0; x < W; x++) { s.walls[x] = 1; s.walls[(H - 1) * W + x] = 1; }
   for (let y = 0; y < H; y++) { s.walls[y * W] = 1; s.walls[y * W + W - 1] = 1; }
   for (const r of level.walls || []) {
@@ -186,23 +211,39 @@ export function diffCount(a, b) {
 // ---------------------------------------------------------------------------
 export const TOOLS = [
   {
-    name: 'look',
-    description: 'Describe your surroundings in detail: nearby objects (with descriptions), painted floor, and walls within view.',
-    input_schema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'move_to',
+    name: 'turn',
     description:
-      'Move to tile (x, y). You travel in a straight line (8-directional steps) when the way is clear, otherwise you detour around obstacles. If your brush is down, every tile you enter is painted.',
+      'Turn in place by the given number of degrees: positive turns clockwise (to your right), negative counterclockwise (to your left). Must be a multiple of 45. Returns your updated view; turn 0 degrees to look again without moving.',
     input_schema: {
       type: 'object',
-      properties: { x: { type: 'integer' }, y: { type: 'integer' } },
-      required: ['x', 'y'],
+      properties: { degrees: { type: 'integer', description: 'A multiple of 45, e.g. 90 or -45' } },
+      required: ['degrees'],
     },
   },
   {
-    name: 'pick_up',
-    description: 'Pick up a portable object on or adjacent to your tile. You can hold one object at a time.',
+    name: 'move_forward',
+    description:
+      'Move the given number of steps in the direction you are facing (diagonal headings move diagonally). You stop early if a wall or something solid is in the way. If you hold a paint-soaked brush with your arm lowered (see dip), every tile you enter is painted. Returns your updated view.',
+    input_schema: {
+      type: 'object',
+      properties: { steps: { type: 'integer', minimum: 0 } },
+      required: ['steps'],
+    },
+  },
+  {
+    name: 'sleep',
+    description:
+      'Wait for the given number of seconds (up to 300), then return your updated view, like turning 0 degrees.',
+    input_schema: {
+      type: 'object',
+      properties: { seconds: { type: 'number', minimum: 0, maximum: 300 } },
+      required: ['seconds'],
+    },
+  },
+  {
+    name: 'grab',
+    description:
+      'Grab an object with your arm. It must be on your tile or the tile directly in front of you, and your hand must be empty. You can hold one object at a time.',
     input_schema: {
       type: 'object',
       properties: { object: { type: 'string', description: 'Object id' } },
@@ -210,52 +251,49 @@ export const TOOLS = [
     },
   },
   {
-    name: 'put_down',
-    description: 'Put the object you are holding down on your current tile. This also raises the brush.',
+    name: 'release',
+    description: 'Let go of whatever you are holding. It drops onto your current tile.',
     input_schema: { type: 'object', properties: {} },
   },
   {
-    name: 'set_brush',
+    name: 'dip',
     description:
-      'Lower (down=true) or raise (down=false) the paint brush. Requires holding paint. While the brush is down, your current tile and every tile you move onto is painted, using 1 unit of paint per tile.',
-    input_schema: {
-      type: 'object',
-      properties: { down: { type: 'boolean' } },
-      required: ['down'],
-    },
+      'Lower your arm. A paintbrush lowered next to a can of paint (on your tile or directly in front of you) dips into it and soaks up its paint. A brush with paint on it, lowered anywhere else, paints the floor under you, and keeps painting each tile you move onto until you raise your arm.',
+    input_schema: { type: 'object', properties: {} },
   },
   {
-    name: 'use',
-    description: 'Interact with an object on or adjacent to your tile, or one you are holding.',
+    name: 'raise',
+    description: 'Raise your arm, lifting whatever you hold off the floor. A raised brush paints nothing.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'type',
+    description:
+      'Type text on an object with a keyboard. It must be on your tile or directly in front of you, and your hand must be empty.',
     input_schema: {
       type: 'object',
       properties: {
         object: { type: 'string', description: 'Object id' },
-        text: { type: 'string', description: 'Optional text to type, for objects that accept typing.' },
+        text: { type: 'string', description: 'The text to type' },
       },
-      required: ['object'],
+      required: ['object', 'text'],
     },
   },
 ];
 
-function paintHere(s, notes) {
+// Paint the robot's tile if it is holding a paint-soaked brush with the arm lowered.
+function paintHere(s) {
   const r = s.robot;
-  const p = r.holding?.paint;
-  if (!p || p.amount <= 0) {
-    r.brush = false;
-    notes.push('Out of paint; the brush has been raised.');
-    return false;
-  }
+  const p = r.arm === 'lowered' && r.holding?.absorbsPaint ? r.holding.paint : null;
+  if (!p) return false;
   s.paint[idx(s, r.x, r.y)] = { name: p.name, color: p.color };
-  p.amount--;
   return true;
 }
 
 function stepTo(s, x, y, notes) {
   const r = s.robot;
   r.x = x; r.y = y;
-  let painted = false;
-  if (r.brush) painted = paintHere(s, notes);
+  const painted = paintHere(s);
   for (const o of objectsAt(s, x, y)) {
     const t = o.onEnter?.(s, o);
     if (t) notes.push(t);
@@ -263,91 +301,105 @@ function stepTo(s, x, y, notes) {
   return painted;
 }
 
-function bfsPath(s, sx, sy, tx, ty) {
-  const W = s.width;
-  const prev = new Int32Array(W * s.height).fill(-1);
-  const start = idx(s, sx, sy);
-  prev[start] = start;
-  const q = [start];
-  for (let h = 0; h < q.length; h++) {
-    const cur = q[h];
-    const cx = cur % W, cy = (cur - cx) / W;
-    if (cx === tx && cy === ty) {
-      const path = [];
-      for (let c = cur; c !== start; c = prev[c]) path.push([c % W, Math.floor(c / W)]);
-      return path.reverse();
-    }
-    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      if (!dx && !dy) continue;
-      const nx = cx + dx, ny = cy + dy;
-      if (blocked(s, nx, ny)) continue;
-      const ni = idx(s, nx, ny);
-      if (prev[ni] !== -1) continue;
-      prev[ni] = cur;
-      q.push(ni);
-    }
-  }
-  return null;
+// Objects the arm can reach: on the robot's tile, or on the tile directly in front of it.
+function inReach(s, o) {
+  const r = s.robot, [dx, dy] = DIRS[r.dir];
+  return !o.held && ((o.x === r.x && o.y === r.y) || (o.x === r.x + dx && o.y === r.y + dy));
 }
-
-function findReachable(s, id) {
-  const r = s.robot;
-  if (r.holding?.id === id) return r.holding;
-  return s.objects.find((o) => o.id === id && !o.held && cheb(o.x, o.y, r.x, r.y) <= 1) || null;
+const REACH_HINT = 'You can reach things on your tile or on the tile directly in front of you.';
+function findInReach(s, id) {
+  return s.objects.find((o) => o.id === id && inReach(s, o)) || null;
 }
-
 const ACTIONS = {
-  look: (s) => look(s),
-
-  move_to(s, { x, y }, notes) {
-    x = Number(x); y = Number(y);
-    if (!Number.isInteger(x) || !Number.isInteger(y)) return 'move_to needs integer x and y.';
-    if (isWall(s, x, y)) return `Can't move to (${x},${y}): that's a wall.`;
-    if (blocked(s, x, y)) return `Can't move to (${x},${y}): something solid is there.`;
+  turn(s, { degrees }) {
+    const d = Number(degrees);
+    if (!Number.isInteger(d) || d % 45 !== 0) return 'turn needs a whole number of degrees that is a multiple of 45 (e.g. 90 or -45).';
     const r = s.robot;
-    if (r.x === x && r.y === y) return `You're already at (${x},${y}).`;
-    let path = lineCells(r.x, r.y, x, y).slice(1);
-    const straight = path.every(([a, b]) => !blocked(s, a, b));
-    if (!straight) path = bfsPath(s, r.x, r.y, x, y);
-    if (!path) return `No path to (${x},${y}).`;
-    let painted = 0;
-    for (const [a, b] of path) if (stepTo(s, a, b, notes)) painted++;
-    return `Moved to (${r.x},${r.y}) in ${path.length} steps${straight ? '' : ' (detoured around obstacles)'}` +
-      (painted ? `, painting ${painted} tiles.` : '.');
+    r.dir = (((r.dir + d / 45) % 8) + 8) % 8;
+    if (d === 0) return `You stay facing ${DIR_NAMES[r.dir]}.`;
+    return `Turned ${Math.abs(d)}° ${d > 0 ? 'clockwise (right)' : 'counterclockwise (left)'}; now facing ${DIR_NAMES[r.dir]}.`;
   },
 
-  pick_up(s, { object }) {
+  // The actual waiting happens in the caller (app.js), since the game runs in real time.
+  sleep(s, { seconds }) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return 'sleep needs a number of seconds (0 or more).';
+    const waited = Math.min(n, 300);
+    return `Waited ${waited} second${waited === 1 ? '' : 's'}${n > 300 ? ' (the most sleep allows)' : ''}.`;
+  },
+
+  move_forward(s, { steps }, notes) {
+    const n = Number(steps);
+    if (!Number.isInteger(n) || n < 0) return 'move_forward needs a whole number of steps (0 or more).';
     const r = s.robot;
-    if (r.holding) return `You're already holding ${r.holding.id}.`;
-    const o = findReachable(s, object);
-    if (!o) return `No object "${object}" within reach.`;
-    if (!o.portable) return `${o.id} can't be picked up.`;
+    const [dx, dy] = DIRS[r.dir];
+    let moved = 0, painted = 0, stoppedBy = null;
+    while (moved < n) {
+      const nx = r.x + dx, ny = r.y + dy;
+      if (blocked(s, nx, ny)) {
+        stoppedBy = isWall(s, nx, ny) ? 'a wall' : (objectsAt(s, nx, ny).find((o) => o.solid)?.id ?? 'something solid');
+        break;
+      }
+      if (stepTo(s, nx, ny, notes)) painted++;
+      moved++;
+    }
+    if (n === 0) return `You stay at (${r.x},${r.y}).`;
+    let text = `Moved ${moved} of ${n} step${n === 1 ? '' : 's'} ${DIR_NAMES[r.dir]} to (${r.x},${r.y})`;
+    if (stoppedBy) text += `; stopped by ${stoppedBy} ahead`;
+    return text + (painted ? `, painting ${painted} tile${painted === 1 ? '' : 's'}.` : '.');
+  },
+
+  grab(s, { object }) {
+    const r = s.robot;
+    if (r.holding) return `You're already holding ${r.holding.id}. Release it first.`;
+    const o = findInReach(s, object);
+    if (!o) return `No "${object}" within reach. ${REACH_HINT}`;
+    if (!o.portable) return `${o.id} is fixed in place; you can't pick it up.`;
     o.held = true;
     r.holding = o;
-    return `Picked up ${o.id}.`;
+    return `You grab ${o.id}.`;
   },
 
-  put_down(s) {
+  release(s) {
     const r = s.robot;
-    if (!r.holding) return "You aren't holding anything.";
+    if (!r.holding) return 'Your hand is already empty.';
     const o = r.holding;
     o.held = false; o.x = r.x; o.y = r.y;
-    r.holding = null; r.brush = false;
-    return `Put down ${o.id} at (${r.x},${r.y}).`;
+    r.holding = null;
+    return `You release ${o.id}; it drops onto your tile (${r.x},${r.y}).`;
   },
 
-  set_brush(s, { down }, notes) {
+  dip(s) {
     const r = s.robot;
-    if (!down) { r.brush = false; return 'Brush raised.'; }
-    if (!r.holding?.paint) return 'You need to be holding paint to lower the brush.';
-    r.brush = true;
-    return paintHere(s, notes) ? `Brush lowered; painted (${r.x},${r.y}).` : 'Brush could not be lowered.';
+    if (r.arm === 'lowered') return 'Your arm is already lowered.';
+    r.arm = 'lowered';
+    const h = r.holding;
+    if (!h) return 'You lower your empty hand.';
+    if (!h.absorbsPaint) return `You lower your arm, holding ${h.id}.`;
+    const can = s.objects.find((o) => o.paint && inReach(s, o));
+    if (can) {
+      h.paint = { name: can.paint.name, color: can.paint.color };
+      return `You dip ${h.id} into ${can.id}. It is now soaked with ${can.paint.name} paint.`;
+    }
+    if (paintHere(s)) return `You lower ${h.id} to the floor, painting (${r.x},${r.y}) ${h.paint.name}.`;
+    return `You lower ${h.id} to the floor. It is dry, so it leaves no mark.`;
   },
 
-  use(s, { object, text }) {
-    const o = findReachable(s, object);
-    if (!o) return `No object "${object}" within reach.`;
-    return o.onUse?.(s, o, { text }) || 'Nothing happens.';
+  raise(s) {
+    const r = s.robot;
+    if (r.arm === 'raised') return 'Your arm is already raised.';
+    r.arm = 'raised';
+    return r.holding ? `You raise your arm, lifting ${r.holding.id}.` : 'You raise your arm.';
+  },
+
+  type(s, { object, text }) {
+    const r = s.robot;
+    if (r.holding) return `You can't type while holding ${r.holding.id}.`;
+    if (typeof text !== 'string' || !text.trim()) return 'type needs some text.';
+    const o = findInReach(s, object);
+    if (!o) return `No "${object}" within reach. ${REACH_HINT}`;
+    if (!o.onType) return `${o.id} has no keyboard.`;
+    return o.onType(s, o, text);
   },
 };
 
@@ -362,8 +414,9 @@ export function act(s, name, input = {}) {
   } catch (e) {
     text = `Action failed: ${e.message}`;
   }
-  if (name === 'look') return text;
-  return [text, ...notes, status(s)].join('\n');
+  // Turning, moving and sleeping return the updated view; other actions just a status line.
+  const tail = name === 'turn' || name === 'move_forward' || name === 'sleep' ? look(s) : status(s);
+  return [text, ...notes, tail].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -372,58 +425,95 @@ export function act(s, name, input = {}) {
 function holdingText(s) {
   const h = s.robot.holding;
   if (!h) return 'nothing';
-  return h.paint ? `${h.id} (${h.paint.name} paint, ${h.paint.amount} units left)` : h.id;
+  if (h.absorbsPaint) return `${h.id} (${h.paint ? `soaked with ${h.paint.name} paint` : 'dry'})`;
+  return h.id;
 }
-
-function visibleObjects(s) {
-  const r = s.robot;
-  return s.objects.filter((o) => !o.held && cheb(o.x, o.y, r.x, r.y) <= VIEW_RADIUS);
-}
-
 export function status(s) {
   const r = s.robot;
-  const seen = visibleObjects(s).map((o) => `${o.id} (${o.x},${o.y})`).join(', ') || 'no objects';
-  return `[You: (${r.x},${r.y}) | holding: ${holdingText(s)} | brush: ${r.brush ? 'down' : 'up'} | in view: ${seen}]`;
+  return `[You: (${r.x},${r.y}), facing ${DIR_NAMES[r.dir]} | holding: ${holdingText(s)} | arm: ${r.arm}]`;
 }
 
-// Row-by-row runs of tiles matching `labelOf` within view, e.g. "y=10: x=10..14 red".
-function runsInView(s, labelOf) {
+// Angle of (x, y) relative to the robot's heading, in degrees: negative = left, positive = right.
+function relAngle(s, x, y) {
   const r = s.robot;
-  const lines = [];
-  for (let y = Math.max(0, r.y - VIEW_RADIUS); y <= Math.min(s.height - 1, r.y + VIEW_RADIUS); y++) {
-    const parts = [];
-    let start = null, label = null;
-    const x0 = Math.max(0, r.x - VIEW_RADIUS), x1 = Math.min(s.width - 1, r.x + VIEW_RADIUS);
-    for (let x = x0; x <= x1 + 1; x++) {
-      const l = x <= x1 ? labelOf(x, y) : null;
-      if (l !== label) {
-        if (label) parts.push(`x=${start === x - 1 ? start : `${start}..${x - 1}`} ${label}`);
-        start = x; label = l;
-      }
+  const a = (Math.atan2(x - r.x, -(y - r.y)) * 180) / Math.PI; // clockwise from north
+  return ((((a - r.dir * 45 + 180) % 360) + 360) % 360) - 180;
+}
+function inCone(s, x, y) {
+  const r = s.robot;
+  return !(x === r.x && y === r.y) && Math.abs(relAngle(s, x, y)) <= FOV / 2 + 1e-9;
+}
+function bearing(s, x, y) {
+  const a = relAngle(s, x, y);
+  if (Math.abs(a) <= 10) return 'straight ahead';
+  const side = a < 0 ? 'left' : 'right';
+  return Math.abs(a) <= 25 ? `ahead, slightly to the ${side}` : `ahead and to the ${side}`;
+}
+const stepsAway = (s, x, y) => cheb(x, y, s.robot.x, s.robot.y);
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// Tiles in the cone within `maxD` steps, nearest first.
+function tilesInCone(s, maxD) {
+  const r = s.robot, out = [];
+  for (let y = Math.max(0, r.y - maxD); y <= Math.min(s.height - 1, r.y + maxD); y++) {
+    for (let x = Math.max(0, r.x - maxD); x <= Math.min(s.width - 1, r.x + maxD); x++) {
+      if (inCone(s, x, y)) out.push([x, y, stepsAway(s, x, y)]);
     }
-    if (parts.length) lines.push(`  y=${y}: ${parts.join(', ')}`);
   }
-  return lines;
+  return out.sort((a, b) => a[2] - b[2]);
 }
 
+// What the robot sees: a FOV-degree cone ahead, plus the tile it is standing on.
+// No line-of-sight blocking yet (the only level has no interior walls).
 export function look(s) {
   const r = s.robot;
   const lines = [
-    `You are at (${r.x},${r.y}). The room is ${s.width}x${s.height} tiles; its outer walls are at x=0, x=${s.width - 1}, y=0 and y=${s.height - 1}.`,
-    `Holding: ${holdingText(s)}. Brush: ${r.brush ? 'down' : 'up'}. You can see ${VIEW_RADIUS} tiles in each direction.`,
+    `You are at (${r.x},${r.y}), facing ${DIR_NAMES[r.dir]}. Holding: ${holdingText(s)}. Arm: ${r.arm}.`,
   ];
-  const objs = visibleObjects(s);
-  lines.push('Objects in view:');
-  if (!objs.length) lines.push('  (none)');
-  for (const o of objs) {
-    const tags = [o.portable ? 'portable' : 'fixed', o.solid ? 'solid' : null].filter(Boolean).join(', ');
-    lines.push(`  ${o.id} at (${o.x},${o.y}) [${tags}]: ${o.description}`);
+
+  const here = s.paint[idx(s, r.x, r.y)];
+  const hereObjs = objectsAt(s, r.x, r.y);
+  lines.push(`Under you: ${here ? `floor painted ${here.name}` : 'bare floor'}` +
+    (hereObjs.length ? `, with ${hereObjs.map((o) => `${o.id} (${o.description})`).join('; ')}` : '') + '.');
+
+  lines.push(`Ahead of you (${FOV}° view):`);
+  const seen = [];
+
+  // Objects: full description up close, brief at mid range, "an object" far away.
+  const objs = s.objects
+    .filter((o) => !o.held && inCone(s, o.x, o.y))
+    .map((o) => ({ o, d: stepsAway(s, o.x, o.y) }))
+    .sort((a, b) => a.d - b.d);
+  for (const { o, d } of objs) {
+    if (d <= NEAR) {
+      seen.push(`- ${o.id} at (${o.x},${o.y}), ${plural(d, 'step')} away${inReach(s, o) ? ' (within reach)' : ''}: ${o.description}`);
+      if (o.screen) seen.push(o.screen(s, o).replace(/^/gm, '    '));
+    }
+    else if (d <= FAR) seen.push(`- ${o.brief || 'an object'} (${o.id}), about ${plural(d, 'step')} away, ${bearing(s, o.x, o.y)}.`);
+    else seen.push(`- An object far in the distance, ${bearing(s, o.x, o.y)}.`);
   }
-  const painted = runsInView(s, (x, y) => s.paint[idx(s, x, y)]?.name ?? null);
-  lines.push('Painted floor in view:', ...(painted.length ? painted : ['  (none)']));
-  const W = s.width, H = s.height;
-  const inner = runsInView(s, (x, y) =>
-    s.walls[idx(s, x, y)] && x > 0 && y > 0 && x < W - 1 && y < H - 1 ? 'wall' : null);
-  if (inner.length) lines.push('Interior walls in view:', ...inner);
+
+  // Paint is only noticed up close.
+  const byColor = new Map();
+  for (const [x, y] of tilesInCone(s, NEAR)) {
+    const p = s.paint[idx(s, x, y)];
+    if (p && !isWall(s, x, y)) byColor.set(p.name, [...(byColor.get(p.name) || []), `(${x},${y})`]);
+  }
+  for (const [name, cells] of byColor) seen.push(`- Floor painted ${name} at ${cells.join(', ')}.`);
+
+  // Walls: exact tiles up close, a distance estimate at mid range, a vague note beyond.
+  // Nearest first; among equally near tiles, the one most nearly straight ahead.
+  const wallTiles = tilesInCone(s, Math.max(s.width, s.height))
+    .filter(([x, y]) => isWall(s, x, y))
+    .sort((a, b) => a[2] - b[2] || Math.abs(relAngle(s, a[0], a[1])) - Math.abs(relAngle(s, b[0], b[1])));
+  const nearWalls = wallTiles.filter(([, , d]) => d <= NEAR);
+  if (nearWalls.length) {
+    seen.push(`- Wall at ${nearWalls.map(([x, y]) => `(${x},${y})`).join(', ')}.`);
+  } else if (wallTiles.length) {
+    const [x, y, d] = wallTiles[0];
+    seen.push(d <= FAR ? `- There is a wall about ${plural(d, 'step')} away, ${bearing(s, x, y)}.` : '- There is a wall far in the distance.');
+  }
+
+  lines.push(...(seen.length ? seen : ['- Nothing you can make out.']));
   return lines.join('\n');
 }

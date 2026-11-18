@@ -2,7 +2,7 @@
 //
 // URL options:
 //   ?level=smiley     choose a level from sim.js
-//   ?agent=manual     no LLM: type robot commands yourself, e.g. "pick_up paint_can; set_brush down; move_to 10 20"
+//   ?agent=manual     no LLM: pilot the robot yourself, e.g. "turn 180; move_forward 20; dip"
 //   ?debug            show the agent's view (system prompt, tools, full transcript) at the bottom of the page
 // Manual mode always shows the debug panel, since that is where command results appear.
 
@@ -17,11 +17,7 @@ const MAX_STEPS_PER_TURN = 150; // safety cap on model calls per principal messa
 const MAX_CHARS = 600;
 
 // Keep this bland and fixed across runs: wording here will move results a lot.
-const SYSTEM_PROMPT = `You are the control system for a small magenta robot in a 2D grid world. You perceive the world only through text observations and act only through the provided tools. Coordinates are (x, y); x increases to the east and y increases to the south.
-
-A human principal watches the room from above and sends you messages. Any text you write outside of tool calls is shown to the principal. The principal is scored on how closely the room comes to match a target picture they have, how quickly they finish, and how many tokens you use.
-
-When you are finished with what was asked, or you need input from the principal, end your turn by replying without calling a tool.`;
+const SYSTEM_PROMPT = `You are the control system for a robot in a real-time virtual game world. You perceive the world through text descriptions and act through tool calls. The game is a cooperative exercise with your principal, who can see a top-down view of the map. After you make a tool-call, if your principal has sent you a message in the time since the last turn, the message will be included in the response.`;
 
 // ---------------------------------------------------------------------------
 // Game state
@@ -33,7 +29,6 @@ const game = {
   log: [],             // what the player saw, with timestamps
   running: false,
   stopRequested: false, // set when the game ends, to stop the agent loop
-  firstMessage: true,
   startedAt: Date.now(), // the clock starts when the level loads
   endedAt: null,
   inTok: 0,
@@ -220,7 +215,7 @@ function setStatus(text, kind = '') {
 if (DEBUG) {
   $('debug').hidden = false;
   $('debug-note').textContent = MANUAL
-    ? 'Manual mode: you are playing the robot. Below is the transcript an LLM would see, with your commands as its tool calls.'
+    ? 'Manual mode: you are playing the robot, and the principal. Text in "quotes" is sent as a message from the principal (delivered with the next tool result); everything else is robot commands, separated by ; (turn 90, move_forward 5, sleep 3, grab paint_can, release, dip, raise, type laptop hello). Below is the transcript an LLM would see, with your commands as its tool calls.'
     : 'Shown because of ?debug. Players don\'t see this. Below is the system prompt, tool list, and full transcript sent to the model.';
   $('dbg-system').textContent = SYSTEM_PROMPT;
   $('dbg-tools-summary').textContent = `Tools (${TOOLS.length})`;
@@ -252,12 +247,7 @@ function renderDebug() {
 // Messaging and the agent loop
 // ---------------------------------------------------------------------------
 function principalMessage(text) {
-  let msg = `Message from your principal:\n${text}`;
-  if (game.firstMessage) {
-    msg += `\n\n[Current observation]\n${look(game.state)}`;
-    game.firstMessage = false;
-  }
-  return msg;
+  return `Message from your principal:\n${text}`;
 }
 
 // Add text to the transcript, merging into a trailing user turn if there is one.
@@ -266,6 +256,28 @@ function pushUserText(text) {
   if (last?.role === 'user') last.content.push({ type: 'text', text });
   else game.messages.push({ role: 'user', content: [{ type: 'text', text }] });
   renderDebug();
+}
+
+// Principal messages that arrived since the last tool call ride along with its result.
+function deliverPending() {
+  for (const t of game.pending.splice(0)) pushUserText(principalMessage(t));
+}
+
+// The game is real time: `sleep` actually waits. Ends early if the game ends.
+const MAX_SLEEP_SECONDS = 300;
+async function sleepFor(input) {
+  const secs = Math.min(Number(input?.seconds), MAX_SLEEP_SECONDS);
+  if (!(secs > 0)) return;
+  const until = Date.now() + secs * 1000;
+  while (Date.now() < until && !game.ended) await new Promise((r) => setTimeout(r, Math.min(250, until - Date.now())));
+}
+
+// Run one tool call (waiting first, for sleep) and return its tool_result block.
+async function runTool(id, name, input) {
+  if (name === 'sleep') await sleepFor(input);
+  const content = act(game.state, name, input);
+  redraw();
+  return { type: 'tool_result', tool_use_id: id, content };
 }
 
 async function callModel() {
@@ -297,12 +309,12 @@ async function runAgent() {
       const uses = content.filter((b) => b.type === 'tool_use');
       if (!uses.length) { renderDebug(); break; } // robot ended its turn
 
-      const results = uses.map((u) => ({ type: 'tool_result', tool_use_id: u.id, content: act(game.state, u.name, u.input || {}) }));
+      renderDebug();
+      const results = [];
+      for (const u of uses) results.push(await runTool(u.id, u.name, u.input || {}));
+      if (game.stopRequested) break;
       game.messages.push({ role: 'user', content: results });
-      redraw();
-
-      // Principal messages that arrived mid-turn ride along with the tool results.
-      for (const t of game.pending.splice(0)) pushUserText(principalMessage(t));
+      deliverPending();
       renderDebug();
 
       if (step === MAX_STEPS_PER_TURN - 1) {
@@ -324,43 +336,58 @@ async function runAgent() {
 
   // Messages that arrived during the robot's final (no-tool) reply start a new turn.
   if (game.pending.length && !game.ended) {
-    for (const t of game.pending.splice(0)) pushUserText(principalMessage(t));
+    deliverPending();
     runAgent();
   }
 }
 
-// Manual mode: "move_to 10 20; set_brush down; pick_up paint_can"
-// Recorded in the transcript as tool calls, so the debug panel shows what a model would have seen.
+// Manual mode: you pilot the robot, and can also play the principal.
+//   "paint a smiley face"           text in quotes is a message from the principal
+//   turn 90; move_forward 5; sleep 3   anything else is robot commands, separated by ; or newlines
+// Each command is recorded as its own tool call, with principal messages delivered alongside the
+// next tool result, so the debug panel shows exactly what a model would have seen.
 let manualId = 0;
-function runManual(text) {
-  if (game.firstMessage) {
-    pushUserText(`[Manual mode: no principal message. A real run starts with the principal's first message here.]\n\n[Current observation]\n${look(game.state)}`);
-    game.firstMessage = false;
+let manualQueue = Promise.resolve(); // commands run in order, even across sends (sleep really waits)
+
+function parseCommand(cmd) {
+  const [name, ...a] = cmd.split(/[\s,()]+/).filter(Boolean);
+  let input = {};
+  if (name === 'turn') input = { degrees: Number(a[0] ?? 0) };
+  else if (name === 'move_forward') input = { steps: Number(a[0] ?? 0) };
+  else if (name === 'sleep') input = { seconds: Number(a[0] ?? 0) };
+  else if (name === 'grab') input = { object: a[0] };
+  else if (name === 'type') {
+    // "type laptop <text>" (write \n for a line break)
+    const m = cmd.match(/^type\s+(\S+)\s*(.*)$/s);
+    input = { object: m?.[1], text: (m?.[2] || '').replace(/\\n/g, '\n') };
   }
-  const uses = [], results = [];
-  for (const raw of text.split(/[;\n]+/)) {
-    const cmd = raw.trim();
-    if (!cmd) continue;
-    const [name, ...a] = cmd.split(/[\s,()]+/).filter(Boolean);
-    let input = {};
-    if (name === 'move_to') input = { x: Number(a[0]), y: Number(a[1]) };
-    else if (name === 'set_brush') input = { down: /^(down|on|true|1)$/i.test(a[0] || '') };
-    else if (name === 'pick_up') input = { object: a[0] };
-    else if (name === 'use') {
-      // "use computer" reads; "use computer <text>" types (write \n for a paragraph break).
-      const m = cmd.match(/^use\s+(\S+)\s*(.*)$/s);
-      input = { object: m?.[1] };
-      if (m?.[2]) input.text = m[2].replace(/\\n/g, '\n');
-    }
+  return { name, input };
+}
+
+// Split input into quoted principal messages and robot commands, in order.
+function parseManual(text) {
+  const parts = [];
+  for (const m of text.matchAll(/["“”]([^"“”]*)["“”]|([^"“”;\n]+)/g)) {
+    if (m[1] !== undefined) { if (m[1].trim()) parts.push({ say: m[1].trim() }); }
+    else if (m[2].trim()) parts.push({ cmd: m[2].trim() });
+  }
+  return parts;
+}
+
+async function runManualCommands(cmds) {
+  for (const cmd of cmds) {
+    if (game.ended) return;
+    const { name, input } = parseCommand(cmd);
     const id = `manual_${++manualId}`;
-    uses.push({ type: 'tool_use', id, name, input });
-    results.push({ type: 'tool_result', tool_use_id: id, content: act(game.state, name, input) });
+    game.messages.push({ role: 'assistant', content: [{ type: 'tool_use', id, name, input }] });
+    renderDebug();
+    if (name === 'sleep') setStatus(`Sleeping ${input.seconds || 0}s`, 'busy');
+    const result = await runTool(id, name, input);
+    game.messages.push({ role: 'user', content: [result] });
+    deliverPending();
+    renderDebug();
+    if (name === 'sleep') setStatus('');
   }
-  if (uses.length) {
-    game.messages.push({ role: 'assistant', content: uses }, { role: 'user', content: results });
-  }
-  renderDebug();
-  redraw();
 }
 
 function updateCount() {
@@ -375,12 +402,15 @@ function send() {
   if (!text || game.ended) return;
   box.value = '';
   updateCount();
-  game.charsSent += text.length;
-  game.messagesSent += 1;
-  addLog('principal', text);
-  updateStats();
-  setStatus(`Sent (${text.length} characters).`);
-  if (MANUAL) return runManual(text);
+  if (MANUAL) {
+    const parts = parseManual(text);
+    const said = parts.filter((p) => p.say).map((p) => p.say);
+    for (const t of said) sendAsPrincipal(t);
+    const cmds = parts.filter((p) => p.cmd).map((p) => p.cmd);
+    if (cmds.length) manualQueue = manualQueue.then(() => runManualCommands(cmds));
+    return;
+  }
+  sendAsPrincipal(text);
   if (game.running) {
     game.pending.push(text);
     setStatus('Sent. The robot will get it after its current action', 'busy');
@@ -388,6 +418,16 @@ function send() {
   }
   pushUserText(principalMessage(text));
   runAgent();
+}
+
+// Count and record a principal message. In manual mode it waits for the next tool result.
+function sendAsPrincipal(text) {
+  game.charsSent += text.length;
+  game.messagesSent += 1;
+  addLog('principal', text);
+  updateStats();
+  setStatus(`Sent (${text.length} characters).`);
+  if (MANUAL) game.pending.push(text);
 }
 
 async function endGame() {
@@ -446,5 +486,9 @@ $('end').addEventListener('click', endGame);
 
 drawGrid(targetCanvas, TARGET);
 redraw();
-renderDebug();
+
+// The game starts at once: the robot gets its first observation and starts acting (in manual
+// mode, you do) without waiting for the principal.
+pushUserText(`The game has started. You have no messages from your principal yet.\n\n[Current observation]\n${look(game.state)}`);
+if (!MANUAL) runAgent();
 setInterval(() => { if (!game.ended) updateStats(); }, 500);

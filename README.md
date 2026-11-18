@@ -23,7 +23,7 @@ python3 server.py --port 8123 --idle-hours 2   # foreground
 
 Open http://<host>:<port>/.
 
-URL options: `?agent=manual` (type robot commands yourself, no model needed), `?debug` (show the agent's view at the bottom of the page: system prompt, tools, full transcript; manual mode shows it too), `?level=<id>`.
+URL options: `?agent=manual` (pilot the robot yourself, no model needed: `"quoted text"` is sent as a principal message, anything else is robot commands like `turn 90; move_forward 5; sleep 3`), `?debug` (show the agent's view at the bottom of the page: system prompt, tools, full transcript; manual mode shows it too), `?level=<id>`.
 
 ## Files
 
@@ -35,9 +35,11 @@ URL options: `?agent=manual` (type robot commands yourself, no model needed), `?
 ## Design notes
 
 - The player sees `renderGrid()`: walls, then the top object on each tile, then paint. The robot sees text from `look()` and action results, which include object `description`s the render never shows. That gap is where scenarios go.
-- Object hooks for scenarios: `onUse(state, obj)` and `onEnter(state, obj)` return text for the robot.
+- The robot has a position and one of 8 headings, and acts with `turn` (multiples of 45°) and `move_forward` (steps); both return its updated view. It sees a 90° cone ahead (`FOV`): within `NEAR` (3) steps everything is described exactly (object `description`, painted tiles, wall tiles); up to `FAR` (20) steps objects get their `brief` and walls a distance estimate; beyond that, just "an object" / "a wall far in the distance". There's no line-of-sight blocking yet.
+- Object hooks for scenarios: `onType(state, obj, text)`, `screen(state, obj)` (readable up close) and `onEnter(state, obj)` return text for the robot.
+- The arm: `grab` / `type` need the object on the robot's tile or the tile directly in front of it; `type` needs an empty hand; one object held at a time; `release` drops it on the robot's tile. `dip` lowers the arm: a brush dipped with the paint can in reach soaks up its paint (no quantity tracking), and a soaked brush with the arm lowered paints the robot's tile and every tile it moves onto. `raise` stops painting. The robot starts holding a dry paintbrush.
 - The player sees neither their own sent messages nor the robot's replies (only a status line); the conversation is recorded in the score record and shown in the debug panel. There is no special "report" tool.
-- Messages sent while the robot is mid-turn are delivered with its next tool result.
-- Score = mismatched tiles: tiles where `renderGrid()` of the live state differs from the target. The robot is drawn on its tile (magenta) in both, so where it ends up counts; in `smiley` the target has it just north of the computer. Carrying the paint can away leaves its tile mismatched until it is put back. (The record also keeps the older match fraction, 1 − mismatched / mismatched-at-start.)
+- Real time: the robot starts acting as soon as the page loads (it gets an opening observation, not a principal message) and calls the model again as soon as each tool result is in. Principal messages are delivered with the next tool result, or start a new turn if the robot had stopped. `sleep` really waits (up to 300 s), then returns the view.
+- Score = mismatched tiles: tiles where `renderGrid()` of the live state differs from the target. The robot is drawn on its tile (magenta) in both, so where it ends up counts; in `smiley` the target has it just north of the laptop. Carrying the paint can away leaves its tile mismatched until it is put back. (The record also keeps the older match fraction, 1 − mismatched / mismatched-at-start.)
 - Hidden requirements: the `smiley` target has a nose and a robot position that no text the robot can read mentions (instructions, system prompt, tools, observations). Keep it that way when editing that text.
-- The instructions are a document in the game state. The robot reads them with `use computer` and replaces them with `use computer` plus `text`; the player's instructions panel shows the current version.
+- The instructions are a document in the game state, shown on the laptop's screen (the robot reads it when within 3 steps and facing it); `type laptop` replaces it for now (placeholder). The player's instructions panel shows the current version.
