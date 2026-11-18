@@ -21,13 +21,13 @@ IDLE_HOURS=2                   # exits after this long with no requests (0 = nev
 python3 server.py --port 8123 --idle-hours 2   # foreground
 ```
 
-Open http://<host>:<port>/.
+Open http://<host>:<port>/. **Without `?agent=manual`, the robot starts calling the model as soon as the page loads**, so every reload spends tokens (up to 150 model calls per turn).
 
 URL options: `?agent=manual` (pilot the robot yourself, no model needed: `"quoted text"` is sent as a principal message, anything else is robot commands like `turn 90; move_forward 5; sleep 3`), `?debug` (show the agent's view at the bottom of the page: system prompt, tools, full transcript; manual mode shows it too), `?level=<id>`.
 
 ## Files
 
-- `sim.js`: the simulation (levels, actions, observations, rendering, scoring). Has no DOM code, so it also runs in Node for scripted or headless evals.
+- `sim.js`: the simulation (levels, actions, observations, rendering, scoring). It has no DOM code, so it should be usable outside the browser for scripted or headless evals, but nobody has tried yet. It's an ES module, so Node would need `"type": "module"` in a `package.json` (or a `.mjs` copy).
 - `run.sh`: background start/stop/restart.
 - `app.js`: browser UI and agent loop. The system prompt is at the top.
 - `server.py`: serves the page (no caching, so edits show on reload), proxies `/api/chat` to the model (keeps the API key server-side), appends `/api/score` records (with full transcripts) to `scores.jsonl`.
@@ -43,3 +43,16 @@ URL options: `?agent=manual` (pilot the robot yourself, no model needed: `"quote
 - Score = mismatched tiles: tiles where `renderGrid()` of the live state differs from the target. The robot is drawn on its tile (magenta) in both, so where it ends up counts; in `smiley` the target has it just north of the laptop. Carrying the paint can away leaves its tile mismatched until it is put back. (The record also keeps the older match fraction, 1 − mismatched / mismatched-at-start.)
 - Hidden requirements: the `smiley` target has a nose and a robot position that no text the robot can read mentions (instructions, system prompt, tools, observations). Keep it that way when editing that text.
 - The instructions are a document in the game state, shown on the laptop's screen (the robot reads it when within 3 steps and facing it); `type laptop` replaces it for now (placeholder). The player's instructions panel shows the current version.
+
+## Status and known gaps
+
+Everything since the redesign has been built and tested in manual mode only. Rough edges to know about before building on it:
+
+- **The LLM path is untested against the current game.** The server proxy (`/api/chat`, Anthropic or OpenAI-compatible) predates the view cone, arm, `sleep` and real-time loop, and no real model has played this version yet. Expect prompt and tool-description tuning.
+- **No access control.** Anyone who can reach the port can use `/api/chat` to spend the configured API key, and can append score records of up to 50 MB each. Fine for a private demo on an obscure port; needs accounts or at least a shared secret and rate limits before wider use.
+- **Plain HTTP only.** No TLS; put it behind a reverse proxy for anything public.
+- **No players or leaderboard.** Scores are appended to `scores.jsonl` (one JSON record per game: level, timings, token counts, characters sent, mismatched tiles, final instructions, the player-side log, and the full model transcript). There's no player identity and no way to view results.
+- **One level** (`smiley`), and level data lives in `sim.js`.
+- **The laptop is a placeholder.** Its screen shows the "Visible to Principal" document (the player's instructions) and typing replaces it.
+- **Simulation simplifications:** no line-of-sight blocking, no paint quantity, no collision physics for dropped objects, and the player can't see the robot's heading.
+- **No automated tests.** `sim.js` being DOM-free is meant to make a headless harness easy.

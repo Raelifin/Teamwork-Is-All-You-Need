@@ -3,3 +3,4 @@ server.log
 .server.pid
 .env
 __pycache__/
+CLAUDE.local.md
