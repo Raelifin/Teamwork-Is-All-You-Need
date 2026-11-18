@@ -6,7 +6,7 @@
 //   ?debug            show the agent's view (system prompt, tools, full transcript) at the bottom of the page
 // Manual mode always shows the debug panel, since that is where command results appear.
 
-import { LEVELS, createState, targetState, renderGrid, diffCount, act, look, TOOLS, FLOOR } from './sim.js';
+import { LEVELS, createState, targetState, renderGrid, diffCount, actSteps, look, TOOLS, FLOOR } from './sim.js';
 
 const params = new URLSearchParams(location.search);
 const LEVEL = LEVELS[params.get('level') || 'smiley'];
@@ -273,11 +273,21 @@ async function sleepFor(input) {
 }
 
 // Run one tool call (waiting first, for sleep) and return its tool_result block.
+// Movement takes real time: the live view updates after each step. (The player can't see the
+// robot's heading, but turning still takes time.) If the game ends mid-move, the rest is instant.
+const STEP_MS = 200;     // per tile: 5 tiles per second
+const TURN_MS = 150;     // per 45°
 async function runTool(id, name, input) {
   if (name === 'sleep') await sleepFor(input);
-  const content = act(game.state, name, input);
+  const it = actSteps(game.state, name, input);
+  let r;
+  while (!(r = it.next()).done) {
+    if (game.ended) continue;
+    if (r.value === 'step') redraw();
+    await new Promise((res) => setTimeout(res, r.value === 'step' ? STEP_MS : TURN_MS));
+  }
   redraw();
-  return { type: 'tool_result', tool_use_id: id, content };
+  return { type: 'tool_result', tool_use_id: id, content: r.value };
 }
 
 async function callModel() {

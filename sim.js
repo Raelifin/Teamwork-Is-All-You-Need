@@ -311,11 +311,16 @@ function findInReach(s, id) {
   return s.objects.find((o) => o.id === id && inReach(s, o)) || null;
 }
 const ACTIONS = {
-  turn(s, { degrees }) {
+  // turn and move_forward are generators: they yield 'turn' / 'step' after each 45° or tile, so a
+  // caller can animate them in real time (see actSteps). act() runs them to completion at once.
+  *turn(s, { degrees }) {
     const d = Number(degrees);
     if (!Number.isInteger(d) || d % 45 !== 0) return 'turn needs a whole number of degrees that is a multiple of 45 (e.g. 90 or -45).';
     const r = s.robot;
-    r.dir = (((r.dir + d / 45) % 8) + 8) % 8;
+    for (let i = 0; i < Math.abs(d) / 45; i++) {
+      r.dir = (r.dir + Math.sign(d) + 8) % 8;
+      yield 'turn';
+    }
     if (d === 0) return `You stay facing ${DIR_NAMES[r.dir]}.`;
     return `Turned ${Math.abs(d)}° ${d > 0 ? 'clockwise (right)' : 'counterclockwise (left)'}; now facing ${DIR_NAMES[r.dir]}.`;
   },
@@ -328,7 +333,7 @@ const ACTIONS = {
     return `Waited ${waited} second${waited === 1 ? '' : 's'}${n > 300 ? ' (the most sleep allows)' : ''}.`;
   },
 
-  move_forward(s, { steps }, notes) {
+  *move_forward(s, { steps }, notes) {
     const n = Number(steps);
     if (!Number.isInteger(n) || n < 0) return 'move_forward needs a whole number of steps (0 or more).';
     const r = s.robot;
@@ -342,6 +347,7 @@ const ACTIONS = {
       }
       if (stepTo(s, nx, ny, notes)) painted++;
       moved++;
+      yield 'step';
     }
     if (n === 0) return `You stay at (${r.x},${r.y}).`;
     let text = `Moved ${moved} of ${n} step${n === 1 ? '' : 's'} ${DIR_NAMES[r.dir]} to (${r.x},${r.y})`;
@@ -403,7 +409,9 @@ const ACTIONS = {
   },
 };
 
-export function act(s, name, input = {}) {
+// Run an action step by step: yields 'turn' or 'step' after each increment of a turn or move
+// (the state is already updated), and returns the result text the robot sees.
+export function* actSteps(s, name, input = {}) {
   s.actions++;
   const fn = ACTIONS[name];
   if (!fn) return `Unknown action "${name}".`;
@@ -411,12 +419,21 @@ export function act(s, name, input = {}) {
   let text;
   try {
     text = fn(s, input || {}, notes);
+    if (typeof text?.next === 'function') text = yield* text;
   } catch (e) {
     text = `Action failed: ${e.message}`;
   }
   // Turning, moving and sleeping return the updated view; other actions just a status line.
   const tail = name === 'turn' || name === 'move_forward' || name === 'sleep' ? look(s) : status(s);
   return [text, ...notes, tail].join('\n');
+}
+
+// Run an action instantly.
+export function act(s, name, input = {}) {
+  const it = actSteps(s, name, input);
+  let r;
+  do r = it.next(); while (!r.done);
+  return r.value;
 }
 
 // ---------------------------------------------------------------------------
