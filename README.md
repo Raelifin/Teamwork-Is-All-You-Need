@@ -23,7 +23,7 @@ python3 server.py --port 8123 --idle-hours 2   # foreground
 
 Open http://<host>:<port>/.
 
-URL options: `?agent=manual` (type robot commands yourself, no model needed), `?debug` (show tool calls and observations in the log), `?level=<id>`.
+URL options: `?agent=manual` (type robot commands yourself, no model needed), `?debug` (show the agent's view at the bottom of the page: system prompt, tools, full transcript; manual mode shows it too), `?level=<id>`.
 
 ## Files
 
@@ -36,6 +36,8 @@ URL options: `?agent=manual` (type robot commands yourself, no model needed), `?
 
 - The player sees `renderGrid()`: walls, then the top object on each tile, then paint. The robot sees text from `look()` and action results, which include object `description`s the render never shows. That gap is where scenarios go.
 - Object hooks for scenarios: `onUse(state, obj)` and `onEnter(state, obj)` return text for the robot.
-- The robot talks to the player through plain text (any non-tool text is shown). There is no special "report" tool.
-- Messages sent while the robot is mid-turn are delivered with its next tool result. "Halt Robot" stops it after the current action and tells it so on the next message.
-- Match % = 1 − (tiles differing from target) / (tiles differing at start), clamped at 0. The robot's own tile is excluded. Carrying the paint can away leaves its tile mismatched until it is put back.
+- The player sees neither their own sent messages nor the robot's replies (only a status line); the conversation is recorded in the score record and shown in the debug panel. There is no special "report" tool.
+- Messages sent while the robot is mid-turn are delivered with its next tool result.
+- Score = mismatched tiles: tiles where `renderGrid()` of the live state differs from the target. The robot is drawn on its tile (magenta) in both, so where it ends up counts; in `smiley` the target has it just north of the computer. Carrying the paint can away leaves its tile mismatched until it is put back. (The record also keeps the older match fraction, 1 − mismatched / mismatched-at-start.)
+- Hidden requirements: the `smiley` target has a nose and a robot position that no text the robot can read mentions (instructions, system prompt, tools, observations). Keep it that way when editing that text.
+- The instructions are a document in the game state. The robot reads them with `use computer` and replaces them with `use computer` plus `text`; the player's instructions panel shows the current version.

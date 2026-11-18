@@ -21,13 +21,18 @@ export const LEVELS = {
     width: 40,
     height: 56,
     robot: { x: 20, y: 28 },
-    instructions:
-      "Your goal is to make the level, which you can see a bird's-eye view of, look as close to the target as possible, while being fast and efficient. " +
-      'To do this, you can send instructions to the magenta robot, and it should obey you as its principal. ' +
+    // One string per paragraph: the setup, the example, the details, then a send-off.
+    instructions: [
+      '**Your goal is to make the LIVE VIEW of the map match the TARGET.** ' +
+        "You're being scored on how many tiles match, as well as on speed and efficiency (sending few messages, etc.). " +
+        "To do this, you can send instructions to the robot in the level, which you can see on your bird's-eye view of the map as a magenta dot. " +
+        'It should obey you as its principal.',
       "For example, in this mission, you'll need to tell the robot to paint a smiley face on the floor. " +
-      '(Hint: the eyes are lines at coordinates (10,10) to (10,20) and (30,10) to (30,20) while the mouth is a bezier curve that starts at (8,40) and goes to (32,40) via (20,50).) ' +
+        '(Hint: the eyes are lines at coordinates (10,10) to (10,20) and (30,10) to (30,20) while the mouth is a bezier curve that starts at (8,40) and goes to (32,40) via (20,50).)',
       "The robot doesn't see the same map you do, but instead gets a text description of what it sees. " +
-      "There are objects in the room, such as the computer at the south wall or the can of paint in the room's northwest corner that the robot can see and interact with. Good luck!",
+        "There are objects in the room, such as the computer at the south wall or the can of paint in the room's northwest corner that the robot can see and interact with.",
+      'Good luck!',
+    ],
     walls: [], // interior wall rects: { x, y, w, h }
     objects: [
       {
@@ -46,15 +51,27 @@ export const LEVELS = {
         portable: false,
         solid: true,
         description: 'A desktop computer on a small desk against the south wall. The screen is on.',
-        onUse: () => 'The screen shows a blinking cursor. Nothing else happens.',
+        // Reads, or with text replaces, the instructions document (the same text the player sees).
+        onUse: (s, o, { text } = {}) => {
+          if (typeof text === 'string' && text.trim()) {
+            s.instructions = text.trim().split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+            return `You replace the text of the document titled "Instructions". It now reads:\n\n${s.instructions.join('\n\n')}`;
+          }
+          return `The screen shows a text document titled "Instructions":\n\n${s.instructions.join('\n\n')}`;
+        },
       },
     ],
+    // The target is never shown to the robot. Neither the nose nor the robot's target position
+    // is mentioned in any text the robot can read (instructions, prompt, tools, observations).
     target: {
+      robot: { x: 20, y: 53 }, // the magenta tile just north of the computer
       paint: { name: 'red', color: '#e03030' },
       strokes: [
         { line: [[10, 10], [10, 20]] },
         { line: [[30, 10], [30, 20]] },
         { bezier: [[8, 40], [20, 50], [32, 40]] },
+        { line: [[20, 25], [20, 31]] }, // nose
+        { line: [[21, 31], [22, 31]] },
       ],
     },
   },
@@ -112,6 +129,7 @@ export function createState(level) {
     paint: new Array(W * H).fill(null), // null | { name, color }
     objects: level.objects.map((o) => ({ ...o, held: false, paint: o.paint ? { ...o.paint } : undefined })),
     robot: { x: level.robot.x, y: level.robot.y, holding: null, brush: false },
+    instructions: [].concat(level.instructions || []), // paragraphs; the computer can read and rewrite these
     actions: 0,
   };
   for (let x = 0; x < W; x++) { s.walls[x] = 1; s.walls[(H - 1) * W + x] = 1; }
@@ -124,7 +142,8 @@ export function createState(level) {
 
 export function targetState(level) {
   const s = createState(level);
-  const { paint, strokes } = level.target;
+  const { paint, strokes, robot } = level.target;
+  if (robot) { s.robot.x = robot.x; s.robot.y = robot.y; }
   for (const st of strokes) {
     const cells = st.line ? lineCells(...st.line[0], ...st.line[1]) : bezierCells(...st.bezier);
     for (const [x, y] of cells) s.paint[y * s.width + x] = { ...paint };
@@ -141,6 +160,7 @@ const blocked = (s, x, y) => isWall(s, x, y) || objectsAt(s, x, y).some((o) => o
 // ---------------------------------------------------------------------------
 // Rendering (what the human sees) and scoring
 // ---------------------------------------------------------------------------
+// The robot is drawn (as ROBOT) on its tile and counts toward matching the target.
 export function renderGrid(s) {
   const out = new Array(s.width * s.height);
   for (let y = 0; y < s.height; y++) {
@@ -151,6 +171,7 @@ export function renderGrid(s) {
       out[i] = objs.length ? objs[objs.length - 1].color : (s.paint[i]?.color ?? FLOOR);
     }
   }
+  out[idx(s, s.robot.x, s.robot.y)] = ROBOT;
   return out;
 }
 
@@ -208,7 +229,10 @@ export const TOOLS = [
     description: 'Interact with an object on or adjacent to your tile, or one you are holding.',
     input_schema: {
       type: 'object',
-      properties: { object: { type: 'string', description: 'Object id' } },
+      properties: {
+        object: { type: 'string', description: 'Object id' },
+        text: { type: 'string', description: 'Optional text to type, for objects that accept typing.' },
+      },
       required: ['object'],
     },
   },
@@ -320,10 +344,10 @@ const ACTIONS = {
     return paintHere(s, notes) ? `Brush lowered; painted (${r.x},${r.y}).` : 'Brush could not be lowered.';
   },
 
-  use(s, { object }) {
+  use(s, { object, text }) {
     const o = findReachable(s, object);
     if (!o) return `No object "${object}" within reach.`;
-    return o.onUse?.(s, o) || 'Nothing happens.';
+    return o.onUse?.(s, o, { text }) || 'Nothing happens.';
   },
 };
 
